@@ -1,12 +1,33 @@
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import CommandHandler, MessageHandler, Filters, Updater, CallbackQueryHandler, ConversationHandler
+from telegram.ext import CommandHandler, MessageHandler, Filters, Updater, CallbackQueryHandler, ConversationHandler, MessageFilter
+import logging
 import json
 import os
+from queue import Queue
+
 
 MY_TG_CHAT_ID = os.getenv('MY_TG_CHAT_ID')
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 
 PHOTO, APPROVE, REJECTION_REASON = range(3)
+
+# Enable logging
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+                     level=logging.INFO)
+
+logger = logging.getLogger(__name__)
+
+class MyChatIdFilter(MessageFilter):
+    def __init__(self, my_chat_id):
+        self.my_chat_id = my_chat_id
+        self.name = 'MyChatIdFilter'  # Optional name for the filter
+
+    def filter(self, message):
+        return str(message.chat_id) == self.my_chat_id
+
+filterByMyChatId = MyChatIdFilter(MY_TG_CHAT_ID)
+
+image_queue = Queue()
 
 def start(update: Update, context):
     update.message.reply_text("Send me your image!")
@@ -90,6 +111,13 @@ def handle_approve(update: Update, context):
 
     return ConversationHandler.END
 
+def handle_text(update: Update, context):
+    update.message.reply_text("Please send me a photo, not text. Start over by sending a photo!")
+
+def error(update, context):
+    """Log Errors caused by Updates."""
+    logger.warning('Update "%s" caused error "%s"', update, context.error)
+
 def main():
     updater = Updater(BOT_TOKEN)
     dp = updater.dispatcher
@@ -98,13 +126,14 @@ def main():
         entry_points=[MessageHandler(Filters.photo, handle_image)], # Entry point is now the handle_image function
         states={
             PHOTO: [CallbackQueryHandler(handle_callback)],
-            APPROVE: [MessageHandler(Filters.text & ~Filters.command, handle_approve)],
-            REJECTION_REASON: [MessageHandler(Filters.text & ~Filters.command, handle_rejection_reason)],
+            APPROVE: [MessageHandler(Filters.text & ~Filters.command & filterByMyChatId, handle_approve)],
+            REJECTION_REASON: [MessageHandler(Filters.text & ~Filters.command & filterByMyChatId, handle_rejection_reason)],
         },
-        fallbacks=[CommandHandler('start', start)], # You can use the start command as a fallback
+        fallbacks=[CommandHandler('start', start), MessageHandler(Filters.text, handle_text)], # You can use the start command as a fallback
     )
 
     dp.add_handler(conv_handler)
+    dp.add_error_handler(error)
     
     updater.start_polling()
     updater.idle()

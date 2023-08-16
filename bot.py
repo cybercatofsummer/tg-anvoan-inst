@@ -1,16 +1,19 @@
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
-from telegram.ext import CommandHandler, MessageHandler, Filters, Updater, CallbackQueryHandler, ConversationHandler, MessageFilter, CallbackContext
+from telegram.ext import CommandHandler, MessageHandler, Filters, Updater, CallbackQueryHandler, CallbackContext
+from telegram.error import TelegramError
 import traceback
 import logging
-import json
 import os
-import sqlite3
+import json
+from dotenv import load_dotenv
 
+load_dotenv()
 
+MEDIA_GROUP_TIMEOUT = 1
 MY_TG_CHAT_ID = os.getenv('MY_TG_CHAT_ID')
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 
-PHOTO, APPROVE, REJECTION_REASON = range(3)
+IMAGES, INSTAGRAM_NICK, IN_REVIEW, APPROVE, REJECT = range(5)
 
 # Enable logging
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -18,256 +21,174 @@ logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s
 
 logger = logging.getLogger(__name__)
 
-class MyChatIdFilter(MessageFilter):
-    def __init__(self, my_chat_id):
-        self.my_chat_id = my_chat_id
-        self.name = 'MyChatIdFilter'  # Optional name for the filter
-
-    def filter(self, message):
-        return str(message.chat_id) == self.my_chat_id
-
-filterByMyChatId = MyChatIdFilter(MY_TG_CHAT_ID)
-
 def start(update: Update, context):
-    update.message.reply_text("Send me your image!")
+    user = update.message.from_user
+    if user.id not in context.bot_data and not is_my_chat_id(update.message.chat_id):
+        context.bot_data[user.id] = {
+            "images": [],
+            "username": user.username,
+            "chat_id": update.message.chat_id,
+            "state": IMAGES
+        }
 
-media_groups = {}
+    start_message = "Wait for users\' submissions" if is_my_chat_id(update.message.chat_id) else "Send me your image!"
+    update.message.reply_text(start_message)
+
+def handle_message(update: Update, context):
+    
+    user = update.message.from_user
+    user_id = user.id
+    data = context.user_data if is_my_chat_id(update.message.chat_id) else context.bot_data[user_id]
+    state = data["state"]
+
+    if state == IMAGES:
+        return handle_image(update, context)
+    elif state == INSTAGRAM_NICK:
+        return handle_instagram_name(update, context)
+    elif state == IN_REVIEW:
+        update.message.reply_text("Your submission is being rewieved. Please wait.")
+    elif state == APPROVE:
+        return handle_approve(update, context)
+    elif state == REJECT:
+        return handle_reject(update, context)
+    else: update.message.reply_text("My appologies, something went wrong.")
+
+
+def is_my_chat_id(chat_id):
+    return str(chat_id) == MY_TG_CHAT_ID
 
 def handle_image(update: Update, context):
     user = update.message.from_user
-    chat_id = update.message.chat_id
-    media_group_id = update.message.media_group_id
     image = update.message.photo[-1]
+    user_id = user.id
 
-    if media_group_id:
-        if media_group_id not in media_groups:
-            media_groups[media_group_id] = {
-                "images": [],
-                "user": user,
-                "chat_id": chat_id
-            }
-        media_groups[media_group_id]["images"].append(image.file_id)
+    context.bot_data[user_id]["images"].append(image.file_id)
 
-        # Assuming the last image has been received when the group size matches the number of images
-        if len(media_groups[media_group_id]["images"]) == 2:
-            process_images(context, media_groups[media_group_id])
-            del media_groups[media_group_id]
-            return PHOTO
-    else: 
-        process_single_image(context, image.file_id, user, chat_id)
-        return PHOTO
-    
-def insertToDB(chat_id, message_ids_str, file_ids_str):
-    conn = sqlite3.connect('submissions.db')
-    cursor = conn.cursor()
-    cursor.execute(
-        'INSERT INTO submissions (user_chat_id, admin_message_ids, image_file_ids) VALUES (?, ?, ?)',
-        (chat_id, message_ids_str, file_ids_str)
+    # Start or restart the timer
+    try:
+        # If a job exists, remove it
+        context.job_queue.get_jobs_by_name(str(user_id))[0].schedule_removal()
+    except IndexError:
+        pass  # No job exists yet, so we continue
+        
+    # Schedule the new job
+    context.job_queue.run_once(
+        check_media_group_completion,
+        MEDIA_GROUP_TIMEOUT,
+        context=user_id,
+        name=str(user_id)
     )
-    conn.commit()
-    record_id = cursor.lastrowid
-    conn.close()
-    return record_id
 
-def process_images(context, media_group):
-    images = media_group["images"]
-    user = media_group["user"]
-    chat_id = media_group["chat_id"]
+def check_media_group_completion(context: CallbackContext):
+    user_id = context.job.context
+    context.bot_data[user_id]["state"] = INSTAGRAM_NICK
+    context.bot.send_message(chat_id=user_id, text="Thanks for the images! Please send your Instagram name now.")
+
+def handle_instagram_name(update: Update, context: CallbackContext):
+    instagram_name = update.message.text
+    user = update.message.from_user
+
+    context.bot_data[user.id]["instagram_name"] = instagram_name
+    context.bot_data[user.id]["state"] = IN_REVIEW
+    update.message.reply_text("Thank you! Please wait until your submission is processed.")
+    process_images(context, user.id)
+
+
+def process_images(context, user_id):
+    images = context.bot_data[user_id]["images"]
+    instagram_name = context.bot_data[user_id]["instagram_name"]
+    username = context.bot_data[user_id]["username"]
+
+    approve_data = json.dumps({"action": APPROVE, "user_id": user_id})
+    reject_data = json.dumps({"action": REJECT, "user_id": user_id})
+
+
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("Approve", callback_data=approve_data),
+         InlineKeyboardButton("Reject", callback_data=reject_data)]
+    ])
 
     media = [InputMediaPhoto(file_id) for file_id in images]
-    sent_messages = context.bot.send_media_group(chat_id=MY_TG_CHAT_ID, media=media)
+    sent_images_to_admin = context.bot.send_media_group(chat_id=MY_TG_CHAT_ID, media=media)
+    sent_instagram_name = context.bot.send_message(chat_id=MY_TG_CHAT_ID, text=f"Submission from: {username};\nInstagram name: {instagram_name}", reply_markup=keyboard)
 
-    message_ids = [str(message.message_id) for message in sent_messages]
+    message_ids_to_delete = [message.message_id for message in sent_images_to_admin]
+    message_ids_to_delete.append(sent_instagram_name.message_id)
 
-    # Concatenating file_ids into a single string
-    file_ids_str = ','.join(images)
-    message_ids_str = ','.join(message_ids)
-
-    record_id = insertToDB(chat_id, message_ids_str, file_ids_str)
-
-    approve_data = json.dumps({"action": "approve", "record_id": record_id})
-    reject_data = json.dumps({"action": "reject", "record_id": record_id})
-
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("Approve", callback_data=approve_data),
-         InlineKeyboardButton("Reject", callback_data=reject_data)]
-    ])
-
-    # it's not possible to add keyboard to media group, so just send new message
-    messageForMedia = context.bot.send_message(chat_id=MY_TG_CHAT_ID, text="Submission from: " + user.username, reply_markup=keyboard)
-
-
-    message_ids.append(str(messageForMedia.message_id))
-    updated_message_ids_str = ','.join(message_ids)
-
-    # consider refactoring since I connect to db here twice
-    conn = sqlite3.connect('submissions.db')
-    cursor = conn.cursor()
-    cursor.execute('UPDATE submissions SET admin_message_ids = ? WHERE id = ?', (updated_message_ids_str, record_id))
-    conn.commit()
-    conn.close()
-
-def process_single_image(context, image_file_id, user, chat_id):
-
-    sent_message = context.bot.send_photo(chat_id=MY_TG_CHAT_ID, photo=image_file_id, caption=f"Submission from: {user.username}")
-    # Extracting the message_id
-    message_id = sent_message.message_id
-
-    record_id = insertToDB(chat_id, str(message_id), image_file_id)
-
-    approve_data = json.dumps({"action": "approve", "record_id": record_id})
-    reject_data = json.dumps({"action": "reject", "record_id": record_id})
-
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("Approve", callback_data=approve_data),
-         InlineKeyboardButton("Reject", callback_data=reject_data)]
-    ])
-
-    # Edit the message to include the inline keyboard
-    sent_message.edit_reply_markup(reply_markup=keyboard)
-    # update.message.reply_text("Thanks! Your picture is under review, you'll be notified when it will be posted")
-
+    context.bot_data[user_id]["message_ids_to_delete"] = message_ids_to_delete
 
 def handle_callback(update: Update, context):
+    logger.debug("handle_callback triggered!")
     query = update.callback_query
     query.answer() # This ends the loading state on the button
 
     data = json.loads(query.data)
     action = data['action']
+    context.user_data['proceeded_user_id'] = data['user_id']
 
-    record_id = data['record_id']
+    handle_action(action, query, context)
 
-    submission = getRecordById(record_id)
+def handle_action(action, query, context):
+    message = "post description" if action == APPROVE else "rejection reason"
+    query.message.reply_text(f"Please enter the {message}:")
+    context.user_data['state'] = APPROVE if action == APPROVE else REJECT
 
-    if action == 'approve':
-        return handleApprove(query, context, submission['user_chat_id'], submission['admin_message_ids'], record_id)
-    if action == 'reject':
-        return handleReject(query, context, submission['user_chat_id'], submission['admin_message_ids'], record_id)
-
-
-def handleApprove(query, context, chat_id, message_ids, record_id):
-    query.message.reply_text("Please enter the description for post:")
-    return handleRequest(APPROVE, context, chat_id, message_ids, record_id)
-
-def handleReject(query, context, chat_id, message_ids, record_id):
-    query.message.reply_text("Please enter the reason for rejection:")
-    return handleRequest(REJECTION_REASON, context, chat_id, message_ids, record_id)
-
-def handleRequest(action, context, chat_id, message_ids, record_id): 
-    context.user_data['chat_id'] = chat_id
-    context.user_data['message_ids_to_delete'] = message_ids
-    context.user_data['record_id'] = record_id
-    return APPROVE if action == APPROVE else REJECTION_REASON
-
-def handle_rejection_reason(update: Update, context):
+def handle_reject(update: Update, context):
     rejection_reason = update.message.text
-    chat_id_to_reject = context.user_data['chat_id']
-    message_ids_to_delete = [int(x) for x in context.user_data['message_ids_to_delete'].split(',')]
-    record_id = context.user_data['record_id']
+    user_id = context.user_data['proceeded_user_id']
+    user_chat_id = context.bot_data[user_id]['chat_id']
+    username = context.bot_data[user_id]['username']
 
-    # Delete the original message (you'll need the message_id)
-    for message_id in message_ids_to_delete:
-        context.bot.delete_message(chat_id=MY_TG_CHAT_ID, message_id=message_id)
+    delete_messages(context)
 
     # Notify yourself that the rejection was completed
-    context.bot.send_message(chat_id=MY_TG_CHAT_ID, text=f"Submission from {chat_id_to_reject} rejected for reason: {rejection_reason}")
+    context.bot.send_message(chat_id=MY_TG_CHAT_ID, text=f"Submission from {username} rejected for reason: {rejection_reason}")
 
     # Notify the user that their submission was rejected
-    context.bot.send_message(chat_id=chat_id_to_reject, text=f"Your submission was rejected for the following reason: {rejection_reason}")
-
-    deleteRecordById(record_id)
+    context.bot.send_message(chat_id=user_chat_id, text=f"Your submission was rejected for the following reason: {rejection_reason}\n Please, try again! Send images:")
     
-    return PHOTO if hasPendingSubmissions() else ConversationHandler.END
+    context.user_data['state'] = None
 
 def handle_approve(update: Update, context):
     description = update.message.text
-    chat_id_to_notify = context.user_data['chat_id']
-    message_ids_to_delete = [int(x) for x in context.user_data['message_ids_to_delete'].split(',')]
+    user_id = context.user_data['proceeded_user_id']
+    user_chat_id = context.bot_data[user_id]['chat_id']
 
-    record_id = context.user_data['record_id']
-
-    # Use the description to create the post (e.g., post to Instagram)
-
-    for message_id in message_ids_to_delete:
-        context.bot.delete_message(chat_id=MY_TG_CHAT_ID, message_id=message_id)
-
+    delete_messages(context)
     # Notify the user that their submission was rejected
-    context.bot.send_message(chat_id=chat_id_to_notify, text=f"Your submission was approved and will be posted on Instagram with the following description: {description}")
+    context.bot.send_message(chat_id=user_chat_id, text=f"Your submission was approved and will be posted on Instagram with the following description: {description}")
 
-    deleteRecordById(record_id)
-    
-    return PHOTO if hasPendingSubmissions() else ConversationHandler.END
+    context.user_data['state'] = None
 
-def handle_text(update: Update, context):
-    update.message.reply_text("Please send me a photo, not text. Start over by sending a photo!")
+def delete_messages(context):
+    user_id = context.user_data['proceeded_user_id']
+    for message_id in context.bot_data[user_id]['message_ids_to_delete']:
+        try:
+            context.bot.delete_message(chat_id=MY_TG_CHAT_ID, message_id=message_id)
+        except TelegramError as e:
+            logger.error(f"Error deleting message with ID {message_id}: {e}")
+
+    context.bot_data[user_id]['message_ids_to_delete'] = []
+    context.bot_data[user_id]['images'] = []
+    context.bot_data[user_id]['state'] = IMAGES
 
 def error_callback(update: Update, context: CallbackContext):
     error_message = str(context.error)
     traceback_message = traceback.format_exc()
     context.bot.send_message(chat_id=MY_TG_CHAT_ID, text=f"An error occurred: {error_message}\n{traceback_message}")
-    #logger.error("Global error handler: %s\n%s", error_message, traceback_message)
-
-def getRecordById(record_id):
-    conn = sqlite3.connect('submissions.db')
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
-    cursor.execute('SELECT * FROM submissions WHERE id = ?', (record_id,))
-    submission = cursor.fetchone()
-    conn.close()
-
-    return dict(submission) if submission else None
-
-
-def deleteRecordById(record_id):
-    conn = sqlite3.connect('submissions.db')
-    cursor = conn.cursor()
-
-    cursor.execute('DELETE FROM submissions WHERE id = ?', (record_id,))
-    conn.commit()
-    conn.close()
+    logger.error("Global error handler: %s\n%s", error_message, traceback_message)
 
 def main():
     updater = Updater(BOT_TOKEN)
     dp = updater.dispatcher
 
-    conv_handler = ConversationHandler(
-        entry_points=[MessageHandler(Filters.photo, handle_image)], # Entry point is now the handle_image function
-        states={
-            PHOTO: [CallbackQueryHandler(handle_callback)],
-            APPROVE: [MessageHandler(Filters.text & ~Filters.command & filterByMyChatId, handle_approve)],
-            REJECTION_REASON: [MessageHandler(Filters.text & ~Filters.command & filterByMyChatId, handle_rejection_reason)],
-        },
-        fallbacks=[CommandHandler('start', start), MessageHandler(Filters.text, handle_text)], # You can use the start command as a fallback
-    )
-
-    dp.add_handler(conv_handler)
+    dp.add_handler(CommandHandler('start', start))
+    dp.add_handler(MessageHandler((Filters.text & ~Filters.command) | Filters.photo, handle_message))
+    dp.add_handler(CallbackQueryHandler(handle_callback))
     dp.add_error_handler(error_callback)
     
     updater.start_polling()
     updater.idle()
 
-def hasPendingSubmissions():
-    conn = sqlite3.connect('submissions.db')
-    cursor = conn.cursor()
-    cursor.execute('SELECT COUNT(*) FROM submissions')
-    count = cursor.fetchone()[0]
-    conn.close()
-    return count > 0
-
-def init_db():
-    conn = sqlite3.connect('submissions.db')
-    cursor = conn.cursor()
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS submissions (
-        id INTEGER PRIMARY KEY,
-        user_chat_id INTEGER,
-        admin_message_ids TEXT,
-        image_file_ids TEXT
-    )
-    ''')
-    conn.commit()
-    conn.close()
-
 if __name__ == '__main__':
-    init_db()
     main()

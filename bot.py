@@ -5,13 +5,19 @@ import traceback
 import logging
 import os
 import json
+import requests
 from dotenv import load_dotenv
 
 load_dotenv()
 
 MEDIA_GROUP_TIMEOUT = 1
+IMGUR_ENDPOINT = "https://api.imgur.com/3/upload"
+IMGUR_DELETE_ENDPOINT = "https://api.imgur.com/3/image/{deletehash}"
+IMGUR_CLIENT_ID = os.getenv('IMGUR_CLIENT_ID')
 MY_TG_CHAT_ID = os.getenv('MY_TG_CHAT_ID')
 BOT_TOKEN = os.getenv('BOT_TOKEN')
+INSTAGRAM_ACCESS_TOKEN = os.getenv('INSTAGRAM_ACCESS_TOKEN')
+INSTAGRAM_USER_ID = os.getenv('INSTAGRAM_USER_ID') 
 
 IMAGES, INSTAGRAM_NICK, IN_REVIEW, APPROVE, REJECT = range(5)
 
@@ -31,8 +37,23 @@ def start(update: Update, context):
             "state": IMAGES
         }
 
-    start_message = "Wait for users\' submissions" if is_my_chat_id(update.message.chat_id) else "Send me your image!"
+    start_message = "Wait for users\' submissions" if is_my_chat_id(update.message.chat_id) else (bot_description() + "\n\n Send me your images:")
     update.message.reply_text(start_message)
+
+def help(update: Update, context):
+    update.message.reply_text(bot_description())
+
+def bot_description():
+    return (
+        "🎨 Welcome to the Anvoan Drawings Bot! 🎨\n\n"
+        "Here's how to use this bot:\n"
+        "1️⃣ Send one or more images that you'd like to submit. If you send multiple images, they'll be grouped into a carousel post but no more than 10 images per 1 post\n"
+        "2️⃣ After sending your images, provide your Instagram username so we can credit you when the artwork is posted.\n"
+        "3️⃣ Wait for a confirmation message. Your submission will be reviewed, and if approved, it will be posted on our Instagram page with your credit.\n\n"
+        "📌 Note: Always ensure you have the rights to the images you're submitting. We respect and uphold copyright laws.\n"
+        "📌 If something went wrong then restart bot by /start command.\n\n"
+        "For any other questions or issues, please reach out to our support team. Happy submitting!"
+    )
 
 def handle_message(update: Update, context):
     
@@ -41,9 +62,7 @@ def handle_message(update: Update, context):
     data = context.user_data if is_my_chat_id(update.message.chat_id) else context.bot_data[user_id]
     state = data["state"]
 
-    if state == IMAGES:
-        return handle_image(update, context)
-    elif state == INSTAGRAM_NICK:
+    if state == INSTAGRAM_NICK:
         return handle_instagram_name(update, context)
     elif state == IN_REVIEW:
         update.message.reply_text("Your submission is being rewieved. Please wait.")
@@ -51,7 +70,7 @@ def handle_message(update: Update, context):
         return handle_approve(update, context)
     elif state == REJECT:
         return handle_reject(update, context)
-    else: update.message.reply_text("My appologies, something went wrong.")
+    else: update.message.reply_text("My appologies, something went wrong. Are you sure the data you sent is valid?")
 
 
 def is_my_chat_id(chat_id):
@@ -59,9 +78,15 @@ def is_my_chat_id(chat_id):
 
 def handle_image(update: Update, context):
     user = update.message.from_user
-    image = update.message.photo[-1]
     user_id = user.id
+    data = context.bot_data[user_id]
+    state = data["state"]
 
+    if state != IMAGES:
+        update.message.reply_text("Looks like it is not image!")
+        return
+    
+    image = update.message.photo[-1]
     context.bot_data[user_id]["images"].append(image.file_id)
 
     # Start or restart the timer
@@ -129,7 +154,7 @@ def handle_callback(update: Update, context):
     handle_action(action, query, context)
 
 def handle_action(action, query, context):
-    message = "post description" if action == APPROVE else "rejection reason"
+    message = "instagram name for post (without @)" if action == APPROVE else "rejection reason"
     query.message.reply_text(f"Please enter the {message}:")
     context.user_data['state'] = APPROVE if action == APPROVE else REJECT
 
@@ -149,16 +174,70 @@ def handle_reject(update: Update, context):
     
     context.user_data['state'] = None
 
+def make_description_test(instagram_user_name):
+    return f"Thanks @{instagram_user_name} for such adorable work!\n#anime #animeart #draw #drawings #paintings #anvoan"
+
 def handle_approve(update: Update, context):
-    description = update.message.text
+    description = make_description_test(update.message.text)
     user_id = context.user_data['proceeded_user_id']
     user_chat_id = context.bot_data[user_id]['chat_id']
-
+    
+    make_post(context, description)
     delete_messages(context)
     # Notify the user that their submission was rejected
     context.bot.send_message(chat_id=user_chat_id, text=f"Your submission was approved and will be posted on Instagram with the following description: {description}")
 
     context.user_data['state'] = None
+
+def make_post(context, description):
+    saved_image_paths = save_telegram_images(context)
+    res = upload_to_imgur(saved_image_paths)
+
+    # make instagram carousel post
+    make_instagram_post(res["imgur_links"], description)
+    # delete imgur images after posting
+    delete_from_imgur(res["deletehash"])
+
+def make_instagram_post(img_links, description):
+    # Step 1: Create individual item containers for each image
+    item_ids = []
+    for img_url in img_links:
+        payload = {
+            "image_url": img_url,
+            "is_carousel_item": True,
+            "access_token": INSTAGRAM_ACCESS_TOKEN
+        }
+        response = requests.post(f"https://graph.facebook.com/v13.0/{INSTAGRAM_USER_ID}/media", data=payload)
+        response_data = response.json()
+        if "id" in response_data:
+            item_ids.append(response_data["id"])
+        else:
+            logger.error(f"Error creating item container for {img_url}: {response_data.get('error', {})}")
+
+    # Step 2: Create a carousel container
+    payload = {
+        "media_type": "CAROUSEL",
+        "children": ",".join(item_ids),
+        "caption": description,
+        "access_token": INSTAGRAM_ACCESS_TOKEN
+    }
+    response = requests.post(f"https://graph.facebook.com/v13.0/{INSTAGRAM_USER_ID}/media", data=payload)
+    response_data = response.json()
+    if "id" in response_data:
+        carousel_id = response_data["id"]
+    else:
+        logger.error(f"Error creating carousel container: {response_data.get('error', {})}")
+        return
+    
+    # Step 3: Publish the carousel
+    payload = {
+        "creation_id": carousel_id,
+        "access_token": INSTAGRAM_ACCESS_TOKEN
+    }
+    response = requests.post(f"https://graph.facebook.com/v13.0/{INSTAGRAM_USER_ID}/media_publish", data=payload)
+    response_data = response.json()
+    if "id" not in response_data:
+        logger.error(f"Error publishing carousel: {response_data.get('error', {})}")
 
 def delete_messages(context):
     user_id = context.user_data['proceeded_user_id']
@@ -178,12 +257,75 @@ def error_callback(update: Update, context: CallbackContext):
     context.bot.send_message(chat_id=MY_TG_CHAT_ID, text=f"An error occurred: {error_message}\n{traceback_message}")
     logger.error("Global error handler: %s\n%s", error_message, traceback_message)
 
+def save_telegram_images(context):
+    user_id = context.user_data['proceeded_user_id']
+    saved_image_paths = []
+    
+    current_directory = os.getcwd()
+    image_folder_path = os.path.join(current_directory, 'temp_images')
+    
+    if not os.path.exists(image_folder_path):
+        os.makedirs(image_folder_path)
+
+    for image_id in context.bot_data[user_id]['images']:
+        file = context.bot.get_file(image_id)
+        local_path = os.path.join(image_folder_path, f"{image_id}.jpg")
+        file.download(local_path)
+        saved_image_paths.append(local_path)
+    
+    return saved_image_paths
+
+def cleanup_telegram_images(saved_image_paths):
+    for image_path in saved_image_paths:
+        os.remove(image_path)
+
+def upload_to_imgur(image_paths):
+    res = {
+        "imgur_links": [],
+        "deletehash": [],
+    }
+
+    headers = {
+        "Authorization": f"Client-ID {IMGUR_CLIENT_ID}"
+    }
+
+    for image_path in image_paths:
+        with open(image_path, 'rb') as image_file:
+            files = {
+                'image': image_file
+            }
+            response = requests.post(IMGUR_ENDPOINT, headers=headers, files=files)
+            response_data = response.json()
+            
+            if response.status_code == 200:
+                res["imgur_links"].append(response_data['data']['link'])
+                res["deletehash"].append(response_data['data']['deletehash'])
+            else:
+                logger.error(f"Error uploading {image_path} to Imgur: {response_data['data']}")
+
+    cleanup_telegram_images(image_paths)
+                
+    return res
+
+def delete_from_imgur(deletehashes):
+    headers = {
+        "Authorization": f"Client-ID {IMGUR_CLIENT_ID}"
+    }
+    
+    for deletehash in deletehashes:
+        response = requests.delete(IMGUR_DELETE_ENDPOINT.format(deletehash=deletehash), headers=headers)
+        
+        if response.status_code != 200:
+            logger.error(f"Error deleting image with deletehash {deletehash} from Imgur: {response.text}")
+
 def main():
     updater = Updater(BOT_TOKEN)
     dp = updater.dispatcher
 
     dp.add_handler(CommandHandler('start', start))
-    dp.add_handler(MessageHandler((Filters.text & ~Filters.command) | Filters.photo, handle_message))
+    dp.add_handler(CommandHandler('help', help))
+    dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
+    dp.add_handler(MessageHandler(Filters.photo, handle_image))
     dp.add_handler(CallbackQueryHandler(handle_callback))
     dp.add_error_handler(error_callback)
     

@@ -49,12 +49,21 @@ def bot_description():
     return (
         "🎨 Welcome to the Anvoan Drawings Bot! 🎨\n\n"
         "Here's how to use this bot:\n"
-        "1️⃣ Send one or more images that you'd like to submit. If you send multiple images, they'll be grouped into a carousel post but no more than 10 images per 1 post\n"
+        "1️⃣ Send one or more images that you'd like to submit. If you send multiple images, they'll be grouped into a carousel post but no more than 10 images per 1 post.\n"
         "2️⃣ After sending your images, provide your Instagram username so we can credit you when the artwork is posted.\n"
         "3️⃣ Wait for a confirmation message. Your submission will be reviewed, and if approved, it will be posted on our Instagram page with your credit.\n\n"
         "📌 Note: Always ensure you have the rights to the images you're submitting. We respect and uphold copyright laws.\n"
-        "📌 If something went wrong then restart bot by /start command.\n\n"
-        "For any other questions or issues, please reach out to our support team. Happy submitting!"
+        "📌 This bot is not for chatting. If you try to chat with it, you might break its functionality. If something goes wrong, use the /start command to restart the bot.\n\n"
+        "For any other questions or issues, please reach out to our instagram. Happy submitting!\n\n"
+        
+        "🎨 Добро пожаловать в бот Anvoan Drawings! 🎨\n\n"
+        "Как использовать этого бота:\n"
+        "1️⃣ Отправьте одно или несколько изображений, которые вы хотели бы отправить. Если вы отправите несколько изображений, они будут сгруппированы в карусельный пост, но не более 10 изображений на 1 пост.\n"
+        "2️⃣ После отправки ваших изображений укажите ваше имя пользователя в Instagram, чтобы мы могли указать вас, когда ваша работа будет опубликована.\n"
+        "3️⃣ Ожидайте сообщения с подтверждением. Ваша заявка будет рассмотрена, и если она будет одобрена, она будет опубликована на нашей странице в Instagram с вашим авторством.\n\n"
+        "📌 Примечание: Всегда убедитесь, что у вас есть права на отправляемые изображения. Мы уважаем и соблюдаем авторские права.\n"
+        "📌 Этот бот не предназначен для общения. Если вы попробуете общаться с ним, вы можете нарушить его функциональность. Если что-то пошло не так, используйте команду /start для перезапуска бота.\n\n"
+        "Если у вас есть другие вопросы или проблемы, пишите нам в инстаграм. Удачной отправки!"
     )
 
 def handle_message(update: Update, context):
@@ -90,7 +99,7 @@ def handle_image(update: Update, context):
             "state": IMAGES
         }
 
-        
+
     data = context.bot_data[user_id]
     state = data["state"]
 
@@ -201,7 +210,8 @@ def handle_approve(update: Update, context):
     
     delete_messages(context)
     # Notify the user that their submission was rejected
-    context.bot.send_message(chat_id=user_chat_id, text=f"Your submission was approved and will be posted on Instagram with the following description: {description}")
+    context.bot.send_message(chat_id=user_chat_id, text=f"Your submission was approved and will be posted on Instagram with the following description: {description}\n\nSend new images:")
+    context.bot.send_message(chat_id=MY_TG_CHAT_ID, text=f"Posted with the following description: {description}")
 
     context.user_data['state'] = None
 
@@ -227,51 +237,82 @@ def make_post(context, description):
     except Exception as e:
         context.bot.send_message(chat_id=MY_TG_CHAT_ID, text=f"An error occurred during the posting process: {str(e)}")
         logger.error(f"Error during the posting process: {str(e)}")
+        if "deletehash" in res:
+            delete_from_imgur(res["deletehash"])
         return False
 
 def make_instagram_post(img_links, description):
     try:
-        # Step 1: Create individual item containers for each image
-        item_ids = []
-        for img_url in img_links:
-            payload = {
-                "image_url": img_url,
-                "is_carousel_item": True,
-                "access_token": INSTAGRAM_ACCESS_TOKEN
-            }
-            response = requests.post(f"https://graph.facebook.com/v17.0/{INSTAGRAM_USER_ID}/media", data=payload)
-            response_data = response.json()
-            if "id" in response_data:
-                item_ids.append(response_data["id"])
-            else:
-                return handle_error(f"Error creating item container for {img_url}: {response_data.get('error', {})}")
+        if len(img_links) == 1:
+            return publish_single_image(img_links, description)
+        else: 
+            return publish_carousel(img_links, description)
+    except Exception as e:
+        return handle_error(f"Error during Instagram post creation: {str(e)}")
 
-        # Step 2: Create a carousel container
+def publish_carousel(img_links, description):
+    # Step 1: Create individual item containers for each image
+    item_ids = []
+    for img_url in img_links:
         payload = {
-            "media_type": "CAROUSEL",
-            "children": ",".join(item_ids),
-            "caption": description,
+            "image_url": img_url,
+            "is_carousel_item": True,
             "access_token": INSTAGRAM_ACCESS_TOKEN
         }
         response = requests.post(f"https://graph.facebook.com/v17.0/{INSTAGRAM_USER_ID}/media", data=payload)
         response_data = response.json()
-        if "id" not in response_data:
-            return handle_error(f"Error creating carousel container: {response_data.get('error', {})}")
+        if "id" in response_data:
+            item_ids.append(response_data["id"])
+        else:
+            return handle_error(f"Error creating item container for {img_url}: {response_data.get('error', {})}")
+
+    # Step 2: Create a carousel container
+    payload = {
+        "media_type": "CAROUSEL",
+        "children": ",".join(item_ids),
+        "caption": description,
+        "access_token": INSTAGRAM_ACCESS_TOKEN
+    }
+    response = requests.post(f"https://graph.facebook.com/v17.0/{INSTAGRAM_USER_ID}/media", data=payload)
+    response_data = response.json()
+    if "id" not in response_data:
+        return handle_error(f"Error creating carousel container: {response_data.get('error', {})}")
         
-        # Step 3: Publish the carousel
-        payload = {
-            "creation_id": response_data["id"],
-            "access_token": INSTAGRAM_ACCESS_TOKEN
-        }
-        response = requests.post(f"https://graph.facebook.com/v17.0/{INSTAGRAM_USER_ID}/media_publish", data=payload)
-        response_data = response.json()
-        if "id" not in response_data:
-            return handle_error(f"Error publishing carousel: {response_data.get('error', {})}")
+    # Step 3: Publish the carousel
+    payload = {
+        "creation_id": response_data["id"],
+        "access_token": INSTAGRAM_ACCESS_TOKEN
+    }
+    response = requests.post(f"https://graph.facebook.com/v17.0/{INSTAGRAM_USER_ID}/media_publish", data=payload)
+    response_data = response.json()
+    if "id" not in response_data:
+        return handle_error(f"Error publishing carousel: {response_data.get('error', {})}")
 
-        return None
-    except Exception as e:
-        return handle_error(f"Error during Instagram post creation: {str(e)}")
+    return None
 
+def publish_single_image(img_links, description):
+    img_url = img_links[0]
+    payload = {
+        "image_url": img_url,
+        "caption": description,
+        "access_token": INSTAGRAM_ACCESS_TOKEN
+    }
+    response = requests.post(f"https://graph.facebook.com/v17.0/{INSTAGRAM_USER_ID}/media", data=payload)
+    response_data = response.json()
+    if "id" not in response_data:
+        return handle_error(f"Error creating single image post for {img_url}: {response_data.get('error', {})}")
+            
+    # Publish the single image
+    payload = {
+        "creation_id": response_data["id"],
+        "access_token": INSTAGRAM_ACCESS_TOKEN
+    }
+    response = requests.post(f"https://graph.facebook.com/v17.0/{INSTAGRAM_USER_ID}/media_publish", data=payload)
+    response_data = response.json()
+    if "id" not in response_data:
+        return handle_error(f"Error publishing single image: {response_data.get('error', {})}")
+    
+    return None
     
 def handle_error(message):
     logger.error(message)

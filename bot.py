@@ -18,6 +18,8 @@ MY_TG_CHAT_ID = os.getenv('MY_TG_CHAT_ID')
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 INSTAGRAM_ACCESS_TOKEN = os.getenv('INSTAGRAM_ACCESS_TOKEN')
 INSTAGRAM_USER_ID = os.getenv('INSTAGRAM_USER_ID') 
+FACEBOOK_APP_ID = os.getenv('FACEBOOK_APP_ID') 
+FACEBOOK_SECRET = os.getenv('FACEBOOK_SECRET') 
 
 IMAGES, INSTAGRAM_NICK, IN_REVIEW, APPROVE, REJECT = range(5)
 
@@ -79,6 +81,16 @@ def is_my_chat_id(chat_id):
 def handle_image(update: Update, context):
     user = update.message.from_user
     user_id = user.id
+
+    if user.id not in context.bot_data and not is_my_chat_id(update.message.chat_id):
+        context.bot_data[user.id] = {
+            "images": [],
+            "username": user.username,
+            "chat_id": update.message.chat_id,
+            "state": IMAGES
+        }
+
+        
     data = context.bot_data[user_id]
     state = data["state"]
 
@@ -182,7 +194,11 @@ def handle_approve(update: Update, context):
     user_id = context.user_data['proceeded_user_id']
     user_chat_id = context.bot_data[user_id]['chat_id']
     
-    make_post(context, description)
+    post_result = make_post(context, description)
+    if (not post_result):
+        context.user_data['state'] = None
+        return
+    
     delete_messages(context)
     # Notify the user that their submission was rejected
     context.bot.send_message(chat_id=user_chat_id, text=f"Your submission was approved and will be posted on Instagram with the following description: {description}")
@@ -190,54 +206,76 @@ def handle_approve(update: Update, context):
     context.user_data['state'] = None
 
 def make_post(context, description):
-    saved_image_paths = save_telegram_images(context)
-    res = upload_to_imgur(saved_image_paths)
+    try:
+        saved_image_paths = save_telegram_images(context)
+        res = upload_to_imgur(saved_image_paths)
 
-    # make instagram carousel post
-    make_instagram_post(res["imgur_links"], description)
-    # delete imgur images after posting
-    delete_from_imgur(res["deletehash"])
+        if not res["success"]:
+            context.bot.send_message(chat_id=MY_TG_CHAT_ID, text=f"Error uploading to Imgur: {res['message']}")
+            return False
+
+        post_success_message = make_instagram_post(res["imgur_links"], description)
+
+        # delete imgur images after posting
+        delete_from_imgur(res["deletehash"])
+
+        if post_success_message != None:
+            context.bot.send_message(chat_id=MY_TG_CHAT_ID, text=post_success_message)
+            return False
+        
+        return True
+    except Exception as e:
+        context.bot.send_message(chat_id=MY_TG_CHAT_ID, text=f"An error occurred during the posting process: {str(e)}")
+        logger.error(f"Error during the posting process: {str(e)}")
+        return False
 
 def make_instagram_post(img_links, description):
-    # Step 1: Create individual item containers for each image
-    item_ids = []
-    for img_url in img_links:
+    try:
+        # Step 1: Create individual item containers for each image
+        item_ids = []
+        for img_url in img_links:
+            payload = {
+                "image_url": img_url,
+                "is_carousel_item": True,
+                "access_token": INSTAGRAM_ACCESS_TOKEN
+            }
+            response = requests.post(f"https://graph.facebook.com/v17.0/{INSTAGRAM_USER_ID}/media", data=payload)
+            response_data = response.json()
+            if "id" in response_data:
+                item_ids.append(response_data["id"])
+            else:
+                return handle_error(f"Error creating item container for {img_url}: {response_data.get('error', {})}")
+
+        # Step 2: Create a carousel container
         payload = {
-            "image_url": img_url,
-            "is_carousel_item": True,
+            "media_type": "CAROUSEL",
+            "children": ",".join(item_ids),
+            "caption": description,
             "access_token": INSTAGRAM_ACCESS_TOKEN
         }
-        response = requests.post(f"https://graph.facebook.com/v13.0/{INSTAGRAM_USER_ID}/media", data=payload)
+        response = requests.post(f"https://graph.facebook.com/v17.0/{INSTAGRAM_USER_ID}/media", data=payload)
         response_data = response.json()
-        if "id" in response_data:
-            item_ids.append(response_data["id"])
-        else:
-            logger.error(f"Error creating item container for {img_url}: {response_data.get('error', {})}")
+        if "id" not in response_data:
+            return handle_error(f"Error creating carousel container: {response_data.get('error', {})}")
+        
+        # Step 3: Publish the carousel
+        payload = {
+            "creation_id": response_data["id"],
+            "access_token": INSTAGRAM_ACCESS_TOKEN
+        }
+        response = requests.post(f"https://graph.facebook.com/v17.0/{INSTAGRAM_USER_ID}/media_publish", data=payload)
+        response_data = response.json()
+        if "id" not in response_data:
+            return handle_error(f"Error publishing carousel: {response_data.get('error', {})}")
 
-    # Step 2: Create a carousel container
-    payload = {
-        "media_type": "CAROUSEL",
-        "children": ",".join(item_ids),
-        "caption": description,
-        "access_token": INSTAGRAM_ACCESS_TOKEN
-    }
-    response = requests.post(f"https://graph.facebook.com/v13.0/{INSTAGRAM_USER_ID}/media", data=payload)
-    response_data = response.json()
-    if "id" in response_data:
-        carousel_id = response_data["id"]
-    else:
-        logger.error(f"Error creating carousel container: {response_data.get('error', {})}")
-        return
+        return None
+    except Exception as e:
+        return handle_error(f"Error during Instagram post creation: {str(e)}")
+
     
-    # Step 3: Publish the carousel
-    payload = {
-        "creation_id": carousel_id,
-        "access_token": INSTAGRAM_ACCESS_TOKEN
-    }
-    response = requests.post(f"https://graph.facebook.com/v13.0/{INSTAGRAM_USER_ID}/media_publish", data=payload)
-    response_data = response.json()
-    if "id" not in response_data:
-        logger.error(f"Error publishing carousel: {response_data.get('error', {})}")
+def handle_error(message):
+    logger.error(message)
+    return message
 
 def delete_messages(context):
     user_id = context.user_data['proceeded_user_id']
@@ -283,6 +321,8 @@ def upload_to_imgur(image_paths):
     res = {
         "imgur_links": [],
         "deletehash": [],
+        "success": False,
+        "message": ""
     }
 
     headers = {
@@ -300,8 +340,12 @@ def upload_to_imgur(image_paths):
             if response.status_code == 200:
                 res["imgur_links"].append(response_data['data']['link'])
                 res["deletehash"].append(response_data['data']['deletehash'])
+                res["success"] = True
             else:
-                logger.error(f"Error uploading {image_path} to Imgur: {response_data['data']}")
+                res["success"] = False
+                res["message"] = response_data.get('data', {}).get('error', '')
+                delete_from_imgur(res["deletehash"])
+                break
 
     cleanup_telegram_images(image_paths)
                 
@@ -332,5 +376,23 @@ def main():
     updater.start_polling()
     updater.idle()
 
+def get_long_lived_token():
+    params = {
+        "grant_type": "fb_exchange_token",
+        "client_id": FACEBOOK_APP_ID,
+        "client_secret": FACEBOOK_SECRET,
+        "fb_exchange_token": INSTAGRAM_ACCESS_TOKEN
+    }
+
+    response = requests.get("https://graph.facebook.com/v17.0/oauth/access_token", params=params)
+    data = response.json()
+
+    if "access_token" in data:
+        return data["access_token"]
+    else:
+        logger.error(f"Error getting long-lived token: {data.get('error', {})}")
+        return None
+
 if __name__ == '__main__':
+    # print('long_live_token => ', get_long_lived_token())
     main()

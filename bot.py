@@ -6,9 +6,10 @@ import logging
 import os
 import json
 import requests
-from dotenv import load_dotenv
+# load from .env
+# from dotenv import load_dotenv
 
-load_dotenv()
+# load_dotenv()
 
 MEDIA_GROUP_TIMEOUT = 1
 IMGUR_ENDPOINT = "https://api.imgur.com/3/upload"

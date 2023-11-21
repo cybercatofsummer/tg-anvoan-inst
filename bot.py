@@ -200,7 +200,14 @@ def handle_reject(update: Update, context):
     context.user_data['state'] = None
 
 def make_description_test(instagram_user_name):
-    return f"Thanks @{instagram_user_name} for such adorable work!\n#anime #animeart #draw #drawings #paintings #anvoan"
+    hashtags = [
+        "#AnimeArt", "#AnimeDrawing", "#AnimeIllustration", "#MangaArt", "#OtakuArt",
+        "#AnimeSketch", "#AnimeInk", "#KawaiiDrawings", "#ChibiArt", "#AnimeFanArt",
+        "#AnimeStyle", "#DigitalAnime", "#TraditionalAnime", "#AnimeCreators", "#AnimeArtist",
+        "#AnimeDaily", "#MangaSketch", "#AnimeGallery", "#AnimeCommunity", "#AnimeLove",
+        "#Anime", "#AnimeArt", "#Draw", "#Drawings", "#Paintings", "#Anvoan",
+    ]
+    return f"Thanks @{instagram_user_name} for such adorable work!\n{' '.join(hashtags)}"
 
 def handle_approve(update: Update, context):
     description = make_description_test(update.message.text)

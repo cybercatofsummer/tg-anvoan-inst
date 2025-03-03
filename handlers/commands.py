@@ -1,22 +1,17 @@
 from telegram import Update
 from telegram.ext import CallbackContext
-from services.utils import IMAGES, is_my_chat_id
+from services.constants import IMAGES
+from core.data_manager import DataManager
 
 def start(update: Update, context: CallbackContext):
-    user = update.message.from_user
-    if user.id not in context.bot_data and not is_my_chat_id(update.message.chat_id):
-        context.bot_data[user.id] = {
-            "images": [],
-            "username": user.username,
-            "chat_id": update.message.chat_id,
-            "state": IMAGES
-        }
-
-    start_message = "Wait for users\' submissions" if is_my_chat_id(update.message.chat_id) else (__bot_description() + "\n\n Send me your images:")
-    update.message.reply_text(start_message)
+    manager = DataManager(context, update)
+    manager.message.reply_text(__start_message(manager))
 
 def help(update: Update, context):
-    update.message.reply_text(__bot_description())
+    manager.message.reply_text(__bot_description())
+
+def __start_message(manager: DataManager):
+    return "Wait for users\' submissions" if manager.is_admin_chat_id else (__bot_description() + "\n\n Send me your images:")
 
 def __bot_description():
     # TODO: add language selection

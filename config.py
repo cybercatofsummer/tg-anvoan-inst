@@ -6,7 +6,7 @@ load_dotenv(dotenv_path=".env")
 
 # Telegram Bot Configuration
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-MY_TG_CHAT_ID = os.getenv("MY_TG_CHAT_ID")
+ADMIN_TG_CHAT_ID = os.getenv("ADMIN_TG_CHAT_ID")
 
 # Imgur API Configuration
 IMGUR_CLIENT_ID = os.getenv("IMGUR_CLIENT_ID")

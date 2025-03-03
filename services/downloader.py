@@ -1,10 +1,8 @@
 import os
 from telegram import Update
-from telegram.ext import CallbackContext
+from core.data_manager import DataManager
 
-
-def save_telegram_images(context: CallbackContext) -> list:
-    user_id = context.user_data['proceeded_user_id']
+def save_telegram_images(manager: DataManager) -> list:
     saved_image_paths = []
     
     current_directory = os.getcwd()
@@ -13,8 +11,8 @@ def save_telegram_images(context: CallbackContext) -> list:
     if not os.path.exists(image_folder_path):
         os.makedirs(image_folder_path)
 
-    for image_id in context.bot_data[user_id]['images']:
-        file = context.bot.get_file(image_id)
+    for image_id in manager.images:
+        file = manager.bot.get_file(image_id)
         local_path = os.path.join(image_folder_path, f"{image_id}.jpg")
         file.download(local_path)
         saved_image_paths.append(local_path)
